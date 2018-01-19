@@ -1,0 +1,8 @@
+[package]
+name = "VSD-RS"
+version = "0.1.0"
+authors = ["tzaeru <tzaeru@gmail.com>"]
+
+[dependencies]
+bincode = "0.9.2"
+serde = "1.0.27"
