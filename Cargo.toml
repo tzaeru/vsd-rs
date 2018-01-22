@@ -1,5 +1,5 @@
 [package]
-name = "VSD-RS"
+name = "vsd"
 version = "0.1.0"
 authors = ["tzaeru <tzaeru@gmail.com>"]
 
