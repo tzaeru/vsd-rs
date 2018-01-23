@@ -9,6 +9,7 @@ use std::io::Write;
 use std::io::Read;
 use std::fs::File;
 use std::io;
+use std::io::Seek;
 use std::thread;
 use std::time::{Duration, Instant};
 use std::sync::{Arc, Mutex};
@@ -19,25 +20,26 @@ use std::fs;
 
 use bincode::{serialize, deserialize, Infinite};
 
-pub trait VSDUnlocked<T> {
+pub trait VSDUnlocked {
     fn open(&mut self, file_name: &str);
-    fn write(&mut self, key: &str, data: T);
-    fn read(&self, key: &str) -> Option<&T>;
+    fn write<T: serde::Serialize>(&mut self, key: &str, value: T);
+    fn read<T: serde::de::DeserializeOwned>(&self, key: &str) -> Option<T>;
     fn flush(&mut self);
 }
-pub trait VSDLocked<T> {
+pub trait VSDLocked {
     fn open(&mut self, file_name: &str);
-    fn write(&mut self, key: &str, data: T);
-    fn read(&self, key: &str) -> Option<T>;
+    fn write<T: serde::Serialize>(&mut self, key: &str, value: T);
+    fn read<T: serde::de::DeserializeOwned>(&self, key: &str) -> Option<T>;
 }
 
-pub struct VSD<T: 'static + serde::Serialize + serde::de::DeserializeOwned> {
+// 
+pub struct VSD {
     /// Sync data structure used when VSD operates in a non-locking mode
-    data: HashMap<String, T>,
+    data: HashMap<String, Vec<u8>>,
     /// Sync handle to database file used when VSD operates in a non-locking mode
     file: io::Result<File>,
     /// Mutex'd data structure used when VSD operates in a locking mode
-    data_locked: Arc<Mutex<HashMap<String, T>>>,
+    data_locked: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     /// Mutex'd handle to database file used when VSD operates in a locking mode
     file_locked: Arc<Mutex<io::Result<File>>>,
     /// JoinHandle for a caching thread used to flush periodically to disk
@@ -52,10 +54,9 @@ pub struct VSD<T: 'static + serde::Serialize + serde::de::DeserializeOwned> {
     last_flushed: Arc<Mutex<Instant>>,
 }
 
-impl <T>VSD<T>
-    where T: serde::Serialize + serde::de::DeserializeOwned
+impl VSD
 {
-    pub fn new() -> VSD<T> {
+    pub fn new() -> VSD {
         VSD {
             data: HashMap::new(),
             file: Err(io::Error::new(io::ErrorKind::NotFound, "Database file not opened")),
@@ -70,8 +71,8 @@ impl <T>VSD<T>
     }
 }
 
-impl <T>VSDUnlocked<T> for VSD<T>
-    where T: serde::Serialize + serde::de::DeserializeOwned {
+impl VSDUnlocked for VSD
+{
     /// Opens and reads a database from file.
     /// If file doesn't exist, a new file for the db is created.
     fn open(&mut self, file_name: &str)
@@ -99,18 +100,20 @@ impl <T>VSDUnlocked<T> for VSD<T>
     }
 
     /// Writes to database.
-    fn write(&mut self, key: &str, data: T)
+    fn write<T: serde::Serialize>(&mut self, key: &str, value: T)
     {
+        let data: Vec<u8> = serialize(&value, Infinite).unwrap();
         self.data.insert(key.to_string(), data);
         self.flush();
     }
 
-    fn read(&self, key: &str) -> Option<&T>
+    fn read<T: serde::de::DeserializeOwned>(&self, key: &str) -> Option<T>
     {
         for key in self.data.keys() {
             println!("{}", key);
         }
-        return self.data.get(key);
+
+        return Some(deserialize(&self.data.get(key).unwrap()[..]).unwrap());
     }
 
     fn flush(&mut self)
@@ -123,6 +126,10 @@ impl <T>VSDUnlocked<T> for VSD<T>
         {
             // Must use references, or else ownership of File moves to match
             Ok(ref mut file) => {
+                // Set cursor to 0 before starting writing.
+                let _ = file.seek(std::io::SeekFrom::Start(0));
+                // Set file length to 0 before writing to overwrite it.
+                let _ = file.set_len(0);
                 let _ = file.write_all(&encoded[..]);
             }
             Err(_) => {
@@ -132,13 +139,7 @@ impl <T>VSDUnlocked<T> for VSD<T>
     }
 }
 
-/*impl <T: serde::Serialize + serde::de::DeserializeOwned, LOCK: VSDUnlocked + ?Sized> VSD<T, LOCK> {
-
-
-
-}*/
-
-impl <T: serde::Serialize + serde::de::DeserializeOwned>Drop for VSD<T> {
+impl Drop for VSD {
     fn drop(&mut self) {
         println!("Dropping.");
 
@@ -167,10 +168,9 @@ impl <T: serde::Serialize + serde::de::DeserializeOwned>Drop for VSD<T> {
         }
     }
 }
-impl <T>VSDLocked<T> for VSD<T>
-    where T: serde::Serialize + serde::de::DeserializeOwned + Clone + Send {
 
-
+impl VSDLocked for VSD
+{
     /// Opens and reads a database from file.
     /// If file doesn't exist, a new db is created.
     /// This will spawn a thread to periodically flush several writes to disk at once instead of flushing on every write
@@ -252,6 +252,11 @@ impl <T>VSDLocked<T> for VSD<T>
                 match *file_lock
                 {
                     Ok(ref mut file) => {
+                        // Set cursor to 0 before starting writing.
+                        let _ = file.seek(std::io::SeekFrom::Start(0));
+                        // Set file length to 0 before writing to overwrite it.
+                        file.set_len(0);
+
                         let _ = file.write_all(&encoded[..]);
                         dirty_clone.store(false, Ordering::Relaxed);
                         let mut last_flushed = last_flushed_clone.lock().unwrap();
@@ -266,15 +271,16 @@ impl <T>VSDLocked<T> for VSD<T>
     }
 
     /// Writes to database.
-    fn write(&mut self, key: &str, data: T)
+    fn write<T: serde::Serialize>(&mut self, key: &str, value: T)
     {
+        let data: Vec<u8> = serialize(&value, Infinite).unwrap();
         self.data_locked.lock().unwrap().insert(key.to_string(), data);
         self.dirty.store(true, Ordering::Relaxed);
         let mut last_written = self.last_written.lock().unwrap();
         *last_written = Instant::now();
     }
 
-    fn read(&self, key: &str) -> Option<T>
+    fn read<T: serde::de::DeserializeOwned>(&self, key: &str) -> Option<T>
     {
         // We can't return directly, see: https://stackoverflow.com/a/32083561
         for key in self.data_locked.lock().unwrap().keys() {
@@ -282,17 +288,9 @@ impl <T>VSDLocked<T> for VSD<T>
         }
         let data = self.data_locked.lock().unwrap();
         let value = data.get(key).unwrap();
-        let clone = value.clone();
-        return Some(clone);
+        return Some(deserialize(&value[..]).unwrap());
     }
 }
-
-/*impl VSD<i8> {
-    fn flush(&self)
-    {
-        let encoded: Vec<u8> = serialize(&self.data, Infinite).unwrap();
-    }
-}*/
 
 #[cfg(test)]
 mod tests {
