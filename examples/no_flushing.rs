@@ -3,7 +3,7 @@ extern crate vsd;
 use vsd::{VSD, VSDUnlocked};
 
 fn main() {
-    let mut vsd = VSD::<f32, VSDUnlocked>::new();
-    vsd.write("write_test", 0.5f32);
-    println!("{:?}", vsd.read("write_test").unwrap());
+    let mut vsd = VSD::new();
+    vsd.write::<f32>("test_float_value", 0.5f32);
+    println!("{:?}", vsd.read::<f32>("test_float_value").unwrap());
 }
